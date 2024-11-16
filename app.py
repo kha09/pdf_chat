@@ -144,14 +144,15 @@ def handle_userinput(user_question):
     # Get the response
     response = st.session_state.conversation.invoke(user_question)
     
-    # Add the Q&A to chat history
+    # Add the Q&A to chat history at the beginning
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
     
-    st.session_state.chat_history.extend([
+    # Prepend new messages to the chat history
+    st.session_state.chat_history = [
         {"role": "user", "content": user_question},
         {"role": "assistant", "content": response}
-    ])
+    ] + st.session_state.chat_history
 
     # Find and highlight similar sentences in all PDFs
     for pdf_name in st.session_state.pdf_pages:
@@ -167,14 +168,18 @@ def handle_userinput(user_question):
                 if source_highlights:
                     page['highlights'].extend(source_highlights)
 
-    # Display chat history
-    for message in st.session_state.chat_history:
-        if message["role"] == "user":
-            st.write(user_template.replace(
-                "{{MSG}}", message["content"]), unsafe_allow_html=True)
-        else:
-            st.write(bot_template.replace(
-                "{{MSG}}", message["content"]), unsafe_allow_html=True)
+    # Create a container for chat history
+    chat_container = st.container()
+    
+    # Display chat history (newest first)
+    with chat_container:
+        for message in st.session_state.chat_history:
+            if message["role"] == "user":
+                st.write(user_template.replace(
+                    "{{MSG}}", message["content"]), unsafe_allow_html=True)
+            else:
+                st.write(bot_template.replace(
+                    "{{MSG}}", message["content"]), unsafe_allow_html=True)
 
 
 def display_pdf_page(pdf_name, page_data):
@@ -232,15 +237,20 @@ def main():
     if "retriever" not in st.session_state:
         st.session_state.retriever = None
 
-    # Create two columns with adjusted ratio (3:4 instead of 2:1)
-    left_col, right_col = st.columns([3, 4])  # Changed ratio to give more space to PDF content
+    # Create two columns with adjusted ratio
+    left_col, right_col = st.columns([3, 4])
 
     with left_col:
         st.header("Chat with PDFs :books:")
         if not st.session_state.uploaded_pdfs:
             st.info("👈 Please upload your PDFs in the sidebar to get started!")
-            
+        
+        # Move the question input to the top
         user_question = st.text_input("Ask a question:")
+        
+        # Add some space between input and chat history
+        st.markdown("<br>", unsafe_allow_html=True)
+        
         if user_question:
             handle_userinput(user_question)
 
