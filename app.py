@@ -232,15 +232,15 @@ def main():
     if "retriever" not in st.session_state:
         st.session_state.retriever = None
 
-    # Create two columns
-    left_col, right_col = st.columns([2, 1])  # 2:1 ratio
+    # Create two columns with adjusted ratio (3:4 instead of 2:1)
+    left_col, right_col = st.columns([3, 4])  # Changed ratio to give more space to PDF content
 
     with left_col:
-        st.header("Chat with multiple PDFs :books:")
+        st.header("Chat with PDFs :books:")
         if not st.session_state.uploaded_pdfs:
             st.info("👈 Please upload your PDFs in the sidebar to get started!")
             
-        user_question = st.text_input("Ask a question about your documents:")
+        user_question = st.text_input("Ask a question:")
         if user_question:
             handle_userinput(user_question)
 
