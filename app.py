@@ -11,6 +11,12 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_core.prompts import ChatPromptTemplate
 from htmlTemplates import css, bot_template, user_template
 import re
+from difflib import SequenceMatcher
+import html
+
+def similar(a, b):
+    """Calculate text similarity ratio"""
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
 def get_pdf_text(pdf_docs):
     text = ""
@@ -24,13 +30,16 @@ def get_pdf_text(pdf_docs):
         
         for page_num, page in enumerate(pdf_reader.pages):
             page_text = page.extract_text()
-            pdf_text += page_text
-            # Store page text and number
+            # Split page text into sentences
+            sentences = [s.strip() for s in re.split(r'[.!?]+', page_text) if s.strip()]
+            
             st.session_state.pdf_pages[pdf.name].append({
                 'page_num': page_num + 1,
                 'text': page_text,
+                'sentences': sentences,
                 'highlights': []  # Store multiple highlights per page
             })
+            pdf_text += page_text
         text += pdf_text
     return text
 
@@ -71,7 +80,7 @@ def get_conversation_chain(vectorstore):
     
     Question: {question}
     
-    Answer the question directly and concisely.
+    Provide a clear and direct answer using information from the context.
     """
     prompt = ChatPromptTemplate.from_template(template)
     
@@ -95,13 +104,28 @@ def get_conversation_chain(vectorstore):
     return chain, retriever
 
 
-def highlight_text_in_page(page_text, source_text):
-    """Find and store highlight positions in the page text"""
-    # Clean and escape the source text for regex
-    source_text = re.escape(source_text.strip())
-    # Find all occurrences of the source text in the page
-    matches = list(re.finditer(source_text, page_text, re.IGNORECASE))
-    return matches
+def find_similar_sentences(answer, page_data, similarity_threshold=0.6):
+    """Find sentences similar to the answer in the page"""
+    highlights = []
+    answer_sentences = [s.strip() for s in re.split(r'[.!?]+', answer) if s.strip()]
+    
+    for answer_sent in answer_sentences:
+        for sentence in page_data['sentences']:
+            similarity = similar(answer_sent, sentence)
+            if similarity > similarity_threshold:
+                # Find the position of this sentence in the page text
+                start = page_data['text'].lower().find(sentence.lower())
+                if start != -1:
+                    # Find the actual case-sensitive match
+                    actual_text = page_data['text'][start:start + len(sentence)]
+                    highlights.append({
+                        'start': start,
+                        'end': start + len(actual_text),
+                        'text': actual_text,
+                        'similarity': similarity
+                    })
+    
+    return highlights
 
 
 def handle_userinput(user_question):
@@ -129,22 +153,19 @@ def handle_userinput(user_question):
         {"role": "assistant", "content": response}
     ])
 
-    # Process each relevant document and add highlights
-    for doc in relevant_docs:
-        source_text = doc.page_content
-        # Find this chunk in our stored sources
-        if source_text in st.session_state.chunk_sources:
-            source = st.session_state.chunk_sources[source_text]
-            pdf_name = source['pdf_name']
-            page_num = source['page_num']
+    # Find and highlight similar sentences in all PDFs
+    for pdf_name in st.session_state.pdf_pages:
+        for page in st.session_state.pdf_pages[pdf_name]:
+            # Find sentences similar to the response
+            highlights = find_similar_sentences(response, page)
+            if highlights:
+                page['highlights'].extend(highlights)
             
-            # Find the page
-            for page in st.session_state.pdf_pages[pdf_name]:
-                if page['page_num'] == page_num:
-                    # Find and store highlights
-                    matches = highlight_text_in_page(page['text'], source_text)
-                    if matches:
-                        page['highlights'].extend(matches)
+            # Also highlight sentences from relevant documents
+            for doc in relevant_docs:
+                source_highlights = find_similar_sentences(doc.page_content, page)
+                if source_highlights:
+                    page['highlights'].extend(source_highlights)
 
     # Display chat history
     for message in st.session_state.chat_history:
@@ -160,25 +181,33 @@ def display_pdf_page(pdf_name, page_data):
     """Display a PDF page with highlighted text"""
     st.markdown(f"**Page {page_data['page_num']}**")
     
-    text = page_data['text']
+    # Escape the entire text content first
+    text = html.escape(page_data['text'])
     highlights = page_data['highlights']
     
     if highlights:
-        # Sort highlights in reverse order to process from end to start
-        highlights.sort(key=lambda x: x.start(), reverse=True)
+        # Sort highlights by similarity (highest first) and position (from end)
+        highlights.sort(key=lambda x: (-x.get('similarity', 0), -x['start']))
         
-        # Apply highlights
-        for match in highlights:
-            start, end = match.span()
-            text = (
-                text[:start] +
-                f'<span style="background-color: #ffd700; padding: 2px; border-radius: 3px;">{text[start:end]}</span>' +
-                text[end:]
-            )
+        # Apply highlights with different intensities based on similarity
+        for highlight in highlights:
+            start = highlight['start']
+            end = highlight['end']
+            similarity = highlight.get('similarity', 1.0)
+            highlight_text = html.escape(highlight['text'])
+            
+            # Adjust highlight color intensity based on similarity
+            opacity = min(1.0, similarity)
+            
+            # Create the highlighted version of the text
+            highlighted_text = f'<span style="background-color: rgba(255, 215, 0, {opacity}); padding: 2px; border-radius: 3px;">{highlight_text}</span>'
+            
+            # Replace the text at the correct position
+            text = text[:start] + highlighted_text + text[end:]
     
     # Display the text with any highlights
     st.markdown(f"""
-    <div style="border: 1px solid #ddd; padding: 10px; border-radius: 5px; background-color: white;">
+    <div style="border: 1px solid #ddd; padding: 10px; border-radius: 5px; background-color: white; font-family: Arial, sans-serif;">
         {text}
     </div>
     """, unsafe_allow_html=True)
