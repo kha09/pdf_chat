@@ -1,6 +1,6 @@
 import streamlit as st
 from dotenv import load_dotenv
-from PyPDF2 import PdfReader
+from PyPDF2 import PdfReader, PdfWriter
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_community.embeddings import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -13,6 +13,37 @@ from htmlTemplates import css, bot_template, user_template
 import re
 from difflib import SequenceMatcher
 import html
+import io
+import fitz  # PyMuPDF
+
+def create_highlighted_pdf(pdf_bytes, highlights):
+    """Create a new PDF with highlights"""
+    # Create a temporary buffer
+    buffer = io.BytesIO(pdf_bytes)
+    
+    # Open the PDF from the buffer
+    doc = fitz.open(stream=buffer, filetype="pdf")
+    
+    # Add highlights to each page
+    for page_num, page in enumerate(doc):
+        for highlight in highlights.get(page_num + 1, []):
+            # Convert the text position to rectangle coordinates
+            text_instances = page.search_for(highlight['text'])
+            
+            # Add highlight annotation for each instance
+            for inst in text_instances:
+                # Create yellow transparent highlight
+                highlight_color = (1, 1, 0, 0.5)  # Yellow with 0.5 opacity
+                page.add_highlight_annot(inst)
+    
+    # Save the PDF to a bytes buffer
+    output_buffer = io.BytesIO()
+    doc.save(output_buffer)
+    doc.close()
+    
+    # Reset buffer position
+    output_buffer.seek(0)
+    return output_buffer
 
 def similar(a, b):
     """Calculate text similarity ratio"""
@@ -22,11 +53,13 @@ def get_pdf_text(pdf_docs):
     text = ""
     st.session_state.pdf_pages = {}  # Store pages for each PDF
     st.session_state.chunk_sources = {}  # Store mapping of chunks to their sources
+    st.session_state.pdf_highlights = {}  # Store highlights for each PDF
     
     for pdf in pdf_docs:
         pdf_reader = PdfReader(pdf)
         pdf_text = ""
         st.session_state.pdf_pages[pdf.name] = []
+        st.session_state.pdf_highlights[pdf.name] = {}  # Initialize highlights for this PDF
         
         for page_num, page in enumerate(pdf_reader.pages):
             page_text = page.extract_text()
@@ -183,8 +216,39 @@ def handle_userinput(user_question):
 
 
 def display_pdf_page(pdf_name, page_data):
-    """Display a PDF page with highlighted text"""
-    st.markdown(f"**Page {page_data['page_num']}**")
+    """Display a PDF page with highlighted text and download button"""
+    col1, col2 = st.columns([6, 1])
+    
+    with col1:
+        st.markdown(f"**Page {page_data['page_num']}**")
+    
+    with col2:
+        if page_data['highlights']:
+            # Store highlights in session state
+            if page_data['page_num'] not in st.session_state.pdf_highlights[pdf_name]:
+                st.session_state.pdf_highlights[pdf_name][page_data['page_num']] = []
+            
+            for highlight in page_data['highlights']:
+                st.session_state.pdf_highlights[pdf_name][page_data['page_num']].append({
+                    'text': highlight['text'],
+                    'similarity': highlight['similarity']
+                })
+            
+            # Create highlighted PDF
+            try:
+                pdf_bytes = st.session_state.uploaded_pdfs_content[pdf_name]
+                highlighted_pdf = create_highlighted_pdf(pdf_bytes, st.session_state.pdf_highlights[pdf_name])
+                
+                # Add download button
+                st.download_button(
+                    label="📥",
+                    data=highlighted_pdf,
+                    file_name=f"highlighted_{pdf_name}",
+                    mime="application/pdf",
+                    help="Download highlighted PDF"
+                )
+            except Exception as e:
+                st.error(f"Error creating highlighted PDF: {str(e)}")
     
     # Escape the entire text content first
     text = html.escape(page_data['text'])
@@ -230,8 +294,12 @@ def main():
         st.session_state.chat_history = []
     if "uploaded_pdfs" not in st.session_state:
         st.session_state.uploaded_pdfs = []
+    if "uploaded_pdfs_content" not in st.session_state:
+        st.session_state.uploaded_pdfs_content = {}
     if "pdf_pages" not in st.session_state:
         st.session_state.pdf_pages = {}
+    if "pdf_highlights" not in st.session_state:
+        st.session_state.pdf_highlights = {}
     if "chunk_sources" not in st.session_state:
         st.session_state.chunk_sources = {}
     if "retriever" not in st.session_state:
@@ -244,12 +312,11 @@ def main():
         # Create a container for the header with logo and title
         header_container = st.container()
         with header_container:
-            col1, col2 = st.columns([2, 3])
+            col1, col2 = st.columns([1, 4])
             with col1:
-                st.header("Chat with PDFs")
+                st.image("logo.jpg", width=50)
             with col2:
-                st.image("logo.jpg", width=120)
-
+                st.header("Chat with PDFs")
         
         if not st.session_state.uploaded_pdfs:
             st.info("👈 Please upload your PDFs in the sidebar to get started!")
@@ -284,6 +351,13 @@ def main():
         if st.button("Process"):
             if pdf_docs:
                 st.session_state.uploaded_pdfs = pdf_docs  # Store PDFs in session state
+                
+                # Store PDF content in session state
+                for pdf in pdf_docs:
+                    pdf_content = pdf.read()
+                    st.session_state.uploaded_pdfs_content[pdf.name] = pdf_content
+                    pdf.seek(0)  # Reset file pointer for later use
+                
                 with st.spinner("Processing"):
                     # get pdf text
                     raw_text = get_pdf_text(pdf_docs)
