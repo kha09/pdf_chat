@@ -24,17 +24,30 @@ def create_highlighted_pdf(pdf_bytes, highlights):
     # Open the PDF from the buffer
     doc = fitz.open(stream=buffer, filetype="pdf")
     
-    # Add highlights to each page
-    for page_num, page in enumerate(doc):
-        for highlight in highlights.get(page_num + 1, []):
-            # Convert the text position to rectangle coordinates
-            text_instances = page.search_for(highlight['text'])
-            
-            # Add highlight annotation for each instance
-            for inst in text_instances:
-                # Create yellow transparent highlight
-                highlight_color = (1, 1, 0, 0.5)  # Yellow with 0.5 opacity
-                page.add_highlight_annot(inst)
+    # Add highlights to each page if they exist
+    if highlights:
+        for page_num, page in enumerate(doc):
+            page_highlights = highlights.get(page_num + 1, [])
+            if page_highlights:
+                # Get the page text for finding exact positions
+                page_text = page.get_text()
+                
+                for highlight in page_highlights:
+                    # Find all occurrences of the text in the page
+                    text_to_highlight = highlight['text']
+                    text_instances = page.search_for(text_to_highlight)
+                    
+                    # Add highlight annotation for each instance
+                    for inst in text_instances:
+                        # Create yellow transparent highlight with opacity based on similarity
+                        opacity = min(1.0, highlight.get('similarity', 1.0))
+                        yellow_color = (1, 1, 0)  # RGB for yellow
+                        
+                        # Create highlight annotation
+                        annot = page.add_highlight_annot(inst)
+                        annot.set_colors(stroke=yellow_color)
+                        annot.set_opacity(opacity)
+                        annot.update()
     
     # Save the PDF to a bytes buffer
     output_buffer = io.BytesIO()
@@ -44,6 +57,12 @@ def create_highlighted_pdf(pdf_bytes, highlights):
     # Reset buffer position
     output_buffer.seek(0)
     return output_buffer
+
+def has_highlights(pdf_name):
+    """Check if any page in the PDF has highlights"""
+    if pdf_name not in st.session_state.pdf_highlights:
+        return False
+    return any(highlights for page_num, highlights in st.session_state.pdf_highlights[pdf_name].items())
 
 def similar(a, b):
     """Calculate text similarity ratio"""
@@ -216,39 +235,19 @@ def handle_userinput(user_question):
 
 
 def display_pdf_page(pdf_name, page_data):
-    """Display a PDF page with highlighted text and download button"""
-    col1, col2 = st.columns([6, 1])
+    """Display a PDF page with highlighted text"""
+    st.markdown(f"**Page {page_data['page_num']}**")
     
-    with col1:
-        st.markdown(f"**Page {page_data['page_num']}**")
-    
-    with col2:
-        if page_data['highlights']:
-            # Store highlights in session state
-            if page_data['page_num'] not in st.session_state.pdf_highlights[pdf_name]:
-                st.session_state.pdf_highlights[pdf_name][page_data['page_num']] = []
-            
-            for highlight in page_data['highlights']:
-                st.session_state.pdf_highlights[pdf_name][page_data['page_num']].append({
-                    'text': highlight['text'],
-                    'similarity': highlight['similarity']
-                })
-            
-            # Create highlighted PDF
-            try:
-                pdf_bytes = st.session_state.uploaded_pdfs_content[pdf_name]
-                highlighted_pdf = create_highlighted_pdf(pdf_bytes, st.session_state.pdf_highlights[pdf_name])
-                
-                # Add download button
-                st.download_button(
-                    label="📥",
-                    data=highlighted_pdf,
-                    file_name=f"highlighted_{pdf_name}",
-                    mime="application/pdf",
-                    help="Download highlighted PDF"
-                )
-            except Exception as e:
-                st.error(f"Error creating highlighted PDF: {str(e)}")
+    if page_data['highlights']:
+        # Store highlights in session state
+        if page_data['page_num'] not in st.session_state.pdf_highlights[pdf_name]:
+            st.session_state.pdf_highlights[pdf_name][page_data['page_num']] = []
+        
+        for highlight in page_data['highlights']:
+            st.session_state.pdf_highlights[pdf_name][page_data['page_num']].append({
+                'text': highlight['text'],
+                'similarity': highlight['similarity']
+            })
     
     # Escape the entire text content first
     text = html.escape(page_data['text'])
@@ -337,8 +336,31 @@ def main():
             pdf_names = list(st.session_state.pdf_pages.keys())
             selected_pdf = st.selectbox("Select PDF to view", pdf_names)
             
-            # Display pages for selected PDF
             if selected_pdf:
+                # Add download button at the top
+                try:
+                    pdf_bytes = st.session_state.uploaded_pdfs_content[selected_pdf]
+                    # Get highlights if they exist
+                    highlights = st.session_state.pdf_highlights.get(selected_pdf, {})
+                    highlighted_pdf = create_highlighted_pdf(pdf_bytes, highlights)
+                    
+                    col1, col2 = st.columns([6, 1])
+                    with col2:
+                        button_label = "📥 Download PDF"
+                        if has_highlights(selected_pdf):
+                            button_label = "📥 Download Highlighted PDF"
+                        
+                        st.download_button(
+                            label=button_label,
+                            data=highlighted_pdf,
+                            file_name=f"highlighted_{selected_pdf}" if has_highlights(selected_pdf) else selected_pdf,
+                            mime="application/pdf",
+                            help="Download the PDF" + (" with highlights" if has_highlights(selected_pdf) else "")
+                        )
+                except Exception as e:
+                    st.error(f"Error creating PDF: {str(e)}")
+                
+                # Display pages for selected PDF
                 for page in st.session_state.pdf_pages[selected_pdf]:
                     display_pdf_page(selected_pdf, page)
         else:
