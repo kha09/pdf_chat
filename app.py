@@ -241,7 +241,16 @@ def main():
     left_col, right_col = st.columns([3, 4])
 
     with left_col:
-        st.header("Chat with PDFs :books:")
+        # Create a container for the header with logo and title
+        header_container = st.container()
+        with header_container:
+            col1, col2 = st.columns([2, 3])
+            with col1:
+                st.header("Chat with PDFs")
+            with col2:
+                st.image("logo.jpg", width=120)
+
+        
         if not st.session_state.uploaded_pdfs:
             st.info("👈 Please upload your PDFs in the sidebar to get started!")
         
