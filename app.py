@@ -18,61 +18,111 @@ import fitz  # PyMuPDF
 
 def create_highlighted_pdf(pdf_bytes, highlights):
     """Create a new PDF with highlights"""
-    # Create a temporary buffer
-    buffer = io.BytesIO(pdf_bytes)
-    
-    # Open the PDF from the buffer
-    doc = fitz.open(stream=buffer, filetype="pdf")
-    
-    # Add highlights to each page if they exist
-    if highlights:
-        for page_num, page in enumerate(doc):
-            page_highlights = highlights.get(page_num + 1, [])
-            if page_highlights:
-                # Get the page text for finding exact positions
-                page_text = page.get_text()
-                
-                for highlight in page_highlights:
-                    # Find all occurrences of the text in the page
-                    text_to_highlight = highlight['text']
-                    text_instances = page.search_for(text_to_highlight)
+    try:
+        # Create a temporary buffer and open the PDF
+        buffer = io.BytesIO(pdf_bytes)
+        doc = fitz.open(stream=buffer, filetype="pdf")
+        
+        # Track if any highlights were successfully added
+        highlights_added = False
+        
+        # Add highlights to each page if they exist
+        if highlights:
+            for page_num, page in enumerate(doc):
+                page_highlights = highlights.get(page_num + 1, [])
+                if page_highlights:
+                    # Get the page text and structure
+                    page_dict = page.get_text("dict")
+                    words = page.get_text_words()  # Get word locations
                     
-                    # Add highlight annotation for each instance
-                    for inst in text_instances:
-                        # Create yellow transparent highlight with opacity based on similarity
-                        opacity = min(1.0, highlight.get('similarity', 1.0))
-                        yellow_color = (1, 1, 0)  # RGB for yellow
+                    for highlight in page_highlights:
+                        text_to_highlight = highlight['text']
                         
-                        # Create highlight annotation
-                        annot = page.add_highlight_annot(inst)
-                        annot.set_colors(stroke=yellow_color)
-                        annot.set_opacity(opacity)
-                        annot.update()
+                        # Method 1: Direct text search
+                        text_instances = page.search_for(text_to_highlight, quads=True)
+                        
+                        # Method 2: Search by words if direct search fails
+                        if not text_instances:
+                            text_lower = text_to_highlight.lower()
+                            current_rect = None
+                            word_matches = []
+                            
+                            for word in words:
+                                word_text = word[4].lower()
+                                if word_text in text_lower:
+                                    if current_rect is None:
+                                        current_rect = fitz.Rect(word[0:4])
+                                    else:
+                                        current_rect.include_rect(fitz.Rect(word[0:4]))
+                                    word_matches.append(word_text)
+                                    
+                                    # Check if we've found all words
+                                    matched_text = " ".join(word_matches)
+                                    if matched_text in text_lower:
+                                        text_instances.append(current_rect)
+                                        current_rect = None
+                                        word_matches = []
+                        
+                        # Method 3: Search in text blocks
+                        if not text_instances:
+                            for block in page_dict["blocks"]:
+                                if "lines" in block:
+                                    for line in block["lines"]:
+                                        if "spans" in line:
+                                            for span in line["spans"]:
+                                                if text_to_highlight.lower() in span["text"].lower():
+                                                    rect = fitz.Rect(span["bbox"])
+                                                    text_instances.append(rect)
+                        
+                        # Add highlight annotations
+                        for inst in text_instances:
+                            try:
+                                # Create yellow transparent highlight
+                                opacity = min(1.0, highlight.get('similarity', 1.0))
+                                yellow_color = (1, 1, 0)  # RGB for yellow
+                                
+                                # Create highlight annotation with explicit save
+                                annot = page.add_highlight_annot(inst)
+                                annot.set_colors(stroke=yellow_color)
+                                annot.set_opacity(opacity)
+                                annot.update()
+                                
+                                # Force annotation save
+                                page.apply_redactions()
+                                page.clean_contents()
+                                highlights_added = True
+                            except Exception as e:
+                                st.error(f"Error adding highlight: {str(e)}")
+                                continue
+        
+        # Save the PDF with explicit options
+        output_buffer = io.BytesIO()
+        save_options = {
+            'clean': True,
+            'deflate': True,
+            'garbage': 4,
+            'linear': True
+        }
+        
+        # Always save the PDF, whether it has highlights or not
+        doc.save(output_buffer, **save_options)
+        doc.close()
+        buffer.close()
+        output_buffer.seek(0)
+        return output_buffer
     
-    # Save the PDF to a bytes buffer
-    output_buffer = io.BytesIO()
-    doc.save(output_buffer)
-    doc.close()
-    
-    # Reset buffer position
-    output_buffer.seek(0)
-    return output_buffer
-
-def has_highlights(pdf_name):
-    """Check if any page in the PDF has highlights"""
-    if pdf_name not in st.session_state.pdf_highlights:
-        return False
-    return any(highlights for page_num, highlights in st.session_state.pdf_highlights[pdf_name].items())
-
-def similar(a, b):
-    """Calculate text similarity ratio"""
-    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+    except Exception as e:
+        st.error(f"Error processing PDF: {str(e)}")
+        # Return original PDF if highlighting fails
+        buffer.seek(0)
+        return buffer
 
 def get_pdf_text(pdf_docs):
     text = ""
     st.session_state.pdf_pages = {}  # Store pages for each PDF
     st.session_state.chunk_sources = {}  # Store mapping of chunks to their sources
     st.session_state.pdf_highlights = {}  # Store highlights for each PDF
+    st.session_state.highlighted_pdfs = {}  # Store highlighted versions
     
     for pdf in pdf_docs:
         pdf_reader = PdfReader(pdf)
@@ -93,8 +143,21 @@ def get_pdf_text(pdf_docs):
             })
             pdf_text += page_text
         text += pdf_text
+        
+        # Create initial highlighted version
+        pdf_content = st.session_state.uploaded_pdfs_content[pdf.name]
+        highlighted_pdf = create_highlighted_pdf(pdf_content, {})
+        st.session_state.highlighted_pdfs[pdf.name] = highlighted_pdf
+    
     return text
 
+def update_highlighted_pdf(pdf_name):
+    """Update the highlighted version of a PDF"""
+    if pdf_name in st.session_state.uploaded_pdfs_content:
+        pdf_bytes = st.session_state.uploaded_pdfs_content[pdf_name]
+        highlights = st.session_state.pdf_highlights.get(pdf_name, {})
+        highlighted_pdf = create_highlighted_pdf(pdf_bytes, highlights)
+        st.session_state.highlighted_pdfs[pdf_name] = highlighted_pdf
 
 def get_text_chunks(text):
     text_splitter = CharacterTextSplitter(
@@ -117,12 +180,10 @@ def get_text_chunks(text):
     
     return chunks
 
-
 def get_vectorstore(text_chunks):
     embeddings = OpenAIEmbeddings()
     vectorstore = FAISS.from_texts(texts=text_chunks, embedding=embeddings)
     return vectorstore
-
 
 def get_conversation_chain(vectorstore):
     llm = ChatOpenAI(temperature=0.7, model_name='gpt-3.5-turbo')
@@ -155,6 +216,9 @@ def get_conversation_chain(vectorstore):
 
     return chain, retriever
 
+def similar(a, b):
+    """Calculate text similarity ratio"""
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
 def find_similar_sentences(answer, page_data, similarity_threshold=0.6):
     """Find sentences similar to the answer in the page"""
@@ -178,7 +242,6 @@ def find_similar_sentences(answer, page_data, similarity_threshold=0.6):
                     })
     
     return highlights
-
 
 def handle_userinput(user_question):
     if st.session_state.conversation is None:
@@ -206,19 +269,26 @@ def handle_userinput(user_question):
         {"role": "assistant", "content": response}
     ] + st.session_state.chat_history
 
-    # Find and highlight similar sentences in all PDFs
-    for pdf_name in st.session_state.pdf_pages:
-        for page in st.session_state.pdf_pages[pdf_name]:
-            # Find sentences similar to the response
-            highlights = find_similar_sentences(response, page)
-            if highlights:
-                page['highlights'].extend(highlights)
+    with st.spinner("Creating highlighted PDFs..."):
+        # Find and highlight similar sentences in all PDFs
+        for pdf_name in st.session_state.pdf_pages:
+            for page in st.session_state.pdf_pages[pdf_name]:
+                # Find sentences similar to the response
+                highlights = find_similar_sentences(response, page)
+                if highlights:
+                    page['highlights'].extend(highlights)
+                
+                # Also highlight sentences from relevant documents
+                for doc in relevant_docs:
+                    source_highlights = find_similar_sentences(doc.page_content, page)
+                    if source_highlights:
+                        page['highlights'].extend(source_highlights)
             
-            # Also highlight sentences from relevant documents
-            for doc in relevant_docs:
-                source_highlights = find_similar_sentences(doc.page_content, page)
-                if source_highlights:
-                    page['highlights'].extend(source_highlights)
+            # Create highlighted version immediately
+            pdf_bytes = st.session_state.uploaded_pdfs_content[pdf_name]
+            highlights = st.session_state.pdf_highlights.get(pdf_name, {})
+            highlighted_pdf = create_highlighted_pdf(pdf_bytes, highlights)
+            st.session_state.highlighted_pdfs[pdf_name] = highlighted_pdf
 
     # Create a container for chat history
     chat_container = st.container()
@@ -232,7 +302,6 @@ def handle_userinput(user_question):
             else:
                 st.write(bot_template.replace(
                     "{{MSG}}", message["content"]), unsafe_allow_html=True)
-
 
 def display_pdf_page(pdf_name, page_data):
     """Display a PDF page with highlighted text"""
@@ -249,29 +318,42 @@ def display_pdf_page(pdf_name, page_data):
                 'similarity': highlight['similarity']
             })
     
-    # Escape the entire text content first
-    text = html.escape(page_data['text'])
+    # Get the original text and highlights
+    text = page_data['text']
     highlights = page_data['highlights']
     
     if highlights:
-        # Sort highlights by similarity (highest first) and position (from end)
-        highlights.sort(key=lambda x: (-x.get('similarity', 0), -x['start']))
+        # Sort highlights by position (from end to start to avoid offset issues)
+        highlights.sort(key=lambda x: -x['start'])
         
-        # Apply highlights with different intensities based on similarity
+        # Create a list of text segments
+        segments = []
+        last_end = len(text)
+        
         for highlight in highlights:
             start = highlight['start']
             end = highlight['end']
             similarity = highlight.get('similarity', 1.0)
-            highlight_text = html.escape(highlight['text'])
-            
-            # Adjust highlight color intensity based on similarity
             opacity = min(1.0, similarity)
             
-            # Create the highlighted version of the text
-            highlighted_text = f'<span style="background-color: rgba(255, 215, 0, {opacity}); padding: 2px; border-radius: 3px;">{highlight_text}</span>'
+            # Add the text segment after this highlight
+            segments.insert(0, html.escape(text[end:last_end]))
             
-            # Replace the text at the correct position
-            text = text[:start] + highlighted_text + text[end:]
+            # Add the highlighted segment
+            highlight_text = html.escape(text[start:end])
+            segments.insert(0, f'<span style="background-color: rgba(255, 215, 0, {opacity}); padding: 2px; border-radius: 3px;">{highlight_text}</span>')
+            
+            last_end = start
+        
+        # Add any remaining text at the start
+        if last_end > 0:
+            segments.insert(0, html.escape(text[0:last_end]))
+        
+        # Join all segments
+        text = ''.join(segments)
+    else:
+        # If no highlights, just escape the text
+        text = html.escape(text)
     
     # Display the text with any highlights
     st.markdown(f"""
@@ -279,7 +361,6 @@ def display_pdf_page(pdf_name, page_data):
         {text}
     </div>
     """, unsafe_allow_html=True)
-
 
 def main():
     load_dotenv()
@@ -303,6 +384,8 @@ def main():
         st.session_state.chunk_sources = {}
     if "retriever" not in st.session_state:
         st.session_state.retriever = None
+    if "highlighted_pdfs" not in st.session_state:
+        st.session_state.highlighted_pdfs = {}
 
     # Create two columns with adjusted ratio
     left_col, right_col = st.columns([3, 4])
@@ -336,27 +419,30 @@ def main():
             pdf_names = list(st.session_state.pdf_pages.keys())
             selected_pdf = st.selectbox("Select PDF to view", pdf_names)
             
-            if selected_pdf:
-                # Add download button at the top
+            if selected_pdf and selected_pdf in st.session_state.highlighted_pdfs:
                 try:
-                    pdf_bytes = st.session_state.uploaded_pdfs_content[selected_pdf]
-                    # Get highlights if they exist
-                    highlights = st.session_state.pdf_highlights.get(selected_pdf, {})
-                    highlighted_pdf = create_highlighted_pdf(pdf_bytes, highlights)
+                    # Style the download button
+                    st.markdown("""
+                        <style>
+                        div.stDownloadButton > button {
+                            width: 100%;
+                            background-color: #FF4B4B;
+                            color: white;
+                            font-weight: bold;
+                            padding: 0.5rem;
+                        }
+                        </style>
+                    """, unsafe_allow_html=True)
                     
-                    col1, col2 = st.columns([6, 1])
-                    with col2:
-                        button_label = "📥 Download PDF"
-                        if has_highlights(selected_pdf):
-                            button_label = "📥 Download Highlighted PDF"
-                        
-                        st.download_button(
-                            label=button_label,
-                            data=highlighted_pdf,
-                            file_name=f"highlighted_{selected_pdf}" if has_highlights(selected_pdf) else selected_pdf,
-                            mime="application/pdf",
-                            help="Download the PDF" + (" with highlights" if has_highlights(selected_pdf) else "")
-                        )
+                    # Show download button for highlighted PDF
+                    st.download_button(
+                        label="📥 Download Highlighted PDF",
+                        data=st.session_state.highlighted_pdfs[selected_pdf],
+                        file_name=f"highlighted_{selected_pdf}",
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
+                    st.markdown("<br>", unsafe_allow_html=True)  # Add space after button
                 except Exception as e:
                     st.error(f"Error creating PDF: {str(e)}")
                 
@@ -372,28 +458,23 @@ def main():
             "Upload your PDFs here and click on 'Process'", accept_multiple_files=True)
         if st.button("Process"):
             if pdf_docs:
-                st.session_state.uploaded_pdfs = pdf_docs  # Store PDFs in session state
-                
-                # Store PDF content in session state
-                for pdf in pdf_docs:
-                    pdf_content = pdf.read()
-                    st.session_state.uploaded_pdfs_content[pdf.name] = pdf_content
-                    pdf.seek(0)  # Reset file pointer for later use
-                
-                with st.spinner("Processing"):
-                    # get pdf text
+                with st.spinner("Processing PDFs..."):
+                    # Store PDFs in session state
+                    st.session_state.uploaded_pdfs = pdf_docs
+                    
+                    # Store PDF content in session state
+                    for pdf in pdf_docs:
+                        pdf_content = pdf.read()
+                        st.session_state.uploaded_pdfs_content[pdf.name] = pdf_content
+                        pdf.seek(0)  # Reset file pointer for later use
+                    
+                    # Process PDFs and create initial highlighted versions
                     raw_text = get_pdf_text(pdf_docs)
-
-                    # get the text chunks
                     text_chunks = get_text_chunks(raw_text)
-
-                    # create vector store
                     vectorstore = get_vectorstore(text_chunks)
-
-                    # create conversation chain
-                    st.session_state.conversation, st.session_state.retriever = get_conversation_chain(
-                        vectorstore)
-                st.success("PDFs processed successfully!")
+                    st.session_state.conversation, st.session_state.retriever = get_conversation_chain(vectorstore)
+                
+                st.success("PDFs processed and ready!")
             else:
                 st.warning("Please upload PDFs first!")
 
